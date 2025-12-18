@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rugby World Cup 2027 – Full Bracket Picker</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; background:#f5f7fa; margin:0; padding:20px; }
+    h1, h2, h3 { text-align:center; }
+    .container { max-width:1400px; margin:0 auto; }
+    .section { background:#fff; padding:16px; border-radius:12px; margin-bottom:24px; box-shadow:0 2px 6px rgba(0,0,0,0.08); }
+
+    /* Visual grouping */
+    .pools { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:16px; }
+    .pool {
+      background:#f8fafc;
+      border:1px solid #e5e7eb;
+      border-radius:12px;
+      padding:12px;
+    }
+    .pool h3 { margin:0 0 8px 0; }
+
+    .match { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:6px 0; }
+    button { padding:6px 10px; border-radius:8px; border:1px solid #cbd5e1; cursor:pointer; background:#f1f5f9; flex:1; }
+    button.selected { background:#2b6cb0; color:#fff; border-color:#2b6cb0; }
+    button.primary { background:#2b6cb0; color:#fff; border-color:#2b6cb0; flex:0 0 auto; }
+    button:disabled { opacity:0.5; cursor:not-allowed; }
+
+    .bracket { display:grid; grid-template-columns: repeat(5, 1fr); gap:16px; }
+
+    .round {
+      background:#fbfbfd;
+      border:1px solid #e5e7eb;
+      border-radius:12px;
+      padding:12px;
+    }
+
+    /* Alternate tint per round for quick scanning */
+    #round16.round { background:#fdf8ff; }
+    #quarters.round { background:#f8fffb; }
+    #semis.round { background:#fffaf0; }
+    #finals.round { background:#f0f7ff; }
+    #medals.round { background:#fff0f3; }
+
+    select, input { padding:6px; border-radius:8px; margin:4px; border:1px solid #cbd5e1; }
+    .center { text-align:center; }
+    .controls { display:flex; justify-content:center; flex-wrap:wrap; gap:8px; align-items:center; }
+    .note { font-size: 12px; opacity: 0.8; text-align:center; margin-top:8px; }
+
+    .final-scores { margin-top:10px; padding-top:10px; border-top:1px dashed #cbd5e1; }
+    .final-scores .row { display:flex; gap:8px; align-items:center; margin:6px 0; }
+    .final-scores .team { flex:1; font-size: 13px; }
+    .final-scores input { width:90px; }
+  </style>
+</head>
+<body>
+<div class="container" id="bracketRoot">
+  <h1>Rugby World Cup 2027 Bracket Picker</h1>
+
+  <div class="section center">
+    <h2>Your Details</h2>
+    <div class="controls">
+      <input id="userName" placeholder="Your name" required />
+      <input id="userEmail" placeholder="Your email" type="email" required />
+      <button class="primary" onclick="downloadBracket()">Download Bracket Image</button>
+      <button onclick="resetAll()">Reset Bracket</button>
+    </div>
+    <div class="note">Name + email are required before downloading.</div>
+  </div>
+
+  <div class="section">
+    <h2>Pool Stage</h2>
+    <div class="pools" id="pools"></div>
+  </div>
+
+  <div class="section">
+    <h2>Best 3rd Place Teams</h2>
+    <div class="center" id="thirdPlaceSelectors"></div>
+    <div class="note">Only teams with at least 1 pool win are eligible.</div>
+  </div>
+
+  <div class="section">
+    <h2>Knockout Bracket</h2>
+    <div class="bracket">
+      <div id="round16" class="round"><h3>Round of 16</h3></div>
+      <div id="quarters" class="round"><h3>Quarterfinals</h3></div>
+      <div id="semis" class="round"><h3>Semifinals</h3></div>
+      <div id="finals" class="round"><h3>Final</h3></div>
+      <div id="medals" class="round"><h3>Bronze</h3></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---------------- DATA ----------------
+const pools = {
+  A: ['New Zealand', 'Australia', 'Chile', 'Hong Kong'],
+  B: ['South Africa', 'Italy', 'Georgia', 'Romania'],
+  C: ['Argentina', 'Fiji', 'Spain', 'Canada'],
+  D: ['Ireland', 'Scotland', 'Uruguay', 'Portugal'],
+  E: ['France', 'Japan', 'USA', 'Samoa'],
+  F: ['England', 'Wales', 'Tonga', 'Zimbabwe']
+};
+
+function generateMatches(teams) {
+  const matches = [];
+  for (let i = 0; i < teams.length; i++) {
+    for (let j = i + 1; j < teams.length; j++) matches.push([teams[i], teams[j]]);
+  }
+  return matches;
+}
+
+const state = {
+  poolResults: {},
+  thirdPlace: [],
+  R16: {},
+  QF: {},
+  SF: {},
+  Final: {},
+  Bronze: {},
+  FinalScores: { team1: '', team2: '' }
+};
+
+// ---------------- HELPERS ----------------
+const poolsEl = document.getElementById('pools');
+const thirdEl = document.getElementById('thirdPlaceSelectors');
+
+function teamWins() {
+  const wins = {};
+  Object.keys(pools).forEach(p => pools[p].forEach(t => wins[t] = 0));
+  Object.values(state.poolResults).forEach(w => { if (w) wins[w]++; });
+  return wins;
+}
+
+function poolTop(pool, rank) {
+  const wins = teamWins();
+  // Only rank teams within this pool
+  const entries = pools[pool].map(t => [t, wins[t] || 0]);
+  entries.sort((a,b) => b[1]-a[1]);
+  return entries[rank-1]?.[0] || '';
+}
+
+function clearDownstream(fromRound) {
+  // If an upstream pick changes, clear later rounds to avoid stale/invalid selections.
+  const order = ['R16','QF','SF','Final','Bronze'];
+  const idx = order.indexOf(fromRound);
+  for (let i = idx+1; i < order.length; i++) state[order[i]] = {};
+}
+
+function renderMatchButtons(container, id, t1, t2, store, onPick) {
+  const m = document.createElement('div');
+  m.className = 'match';
+
+  [t1, t2].forEach(team => {
+    const btn = document.createElement('button');
+    btn.textContent = team || 'TBD';
+    btn.disabled = !team || team === 'TBD';
+    btn.classList.toggle('selected', store[id] === team);
+    btn.onclick = () => onPick(team);
+    m.appendChild(btn);
+  });
+
+  container.appendChild(m);
+}
+
+// ---------------- POOLS ----------------
+function renderPools() {
+  poolsEl.innerHTML = '';
+  Object.entries(pools).forEach(([pool, teams]) => {
+    const div = document.createElement('div');
+    div.className = 'pool';
+    div.innerHTML = `<h3>Pool ${pool}</h3>`;
+
+    generateMatches(teams).forEach((match, idx) => {
+      const matchId = `${pool}-${idx}`;
+      const mDiv = document.createElement('div');
+      mDiv.className = 'match';
+
+      match.forEach(team => {
+        const btn = document.createElement('button');
+        btn.textContent = team;
+        btn.classList.toggle('selected', state.poolResults[matchId] === team);
+        btn.onclick = () => {
+          state.poolResults[matchId] = team;
+          // Pool results impact everything downstream
+          state.R16 = {}; state.QF = {}; state.SF = {}; state.Final = {}; state.Bronze = {};
+          renderAll();
+        };
+        mDiv.appendChild(btn);
+      });
+
+      div.appendChild(mDiv);
+    });
+
+    poolsEl.appendChild(div);
+  });
+}
+
+// ---------------- THIRD PLACE ----------------
+// Deterministically assign each qualified 3rd-place pool to exactly one R16 slot
+function mapThirdPlaceAssignments() {
+  const assignments = {};
+  const available = new Set(
+    state.thirdPlace
+      .filter(Boolean)
+      .map(t => t.split(': ')[0])
+  );
+
+  const assign = (slot, priorityPools) => {
+    for (const p of priorityPools) {
+      if (available.has(p)) {
+        assignments[slot] = p;
+        available.delete(p);
+        return;
+      }
+    }
+    assignments[slot] = null;
+  };
+
+  // Slot A: vs Pool A winner
+  assign('A', ['C','E','F']);
+  // Slot B: vs Pool B winner
+  assign('B', ['D','E','F']);
+  // Slot C: vs Pool C winner
+  assign('C', ['A','E','F']);
+  // Slot D: vs Pool D winner
+  assign('D', ['B','E','F']);
+
+  return assignments;
+}
+
+function renderThirdPlaceSelectors() {
+  thirdEl.innerHTML = '';
+
+  const wins = teamWins();
+  const usedPools = new Set(state.thirdPlace.filter(Boolean).map(v => v.split(':')[0]));
+
+  for (let i = 0; i < 4; i++) {
+    const select = document.createElement('select');
+    select.appendChild(new Option(`Select 3rd Place Team ${i+1}`, ''));
+
+    Object.entries(pools).forEach(([pool, teams]) => {
+      const first = poolTop(pool,1);
+      const second = poolTop(pool,2);
+
+      teams.forEach(team => {
+        // must have at least 1 win
+        if ((wins[team] || 0) < 1) return;
+        // cannot be winner/runner-up
+        if (team === first || team === second) return;
+        // only one per pool (unless editing current selection)
+        if (usedPools.has(pool) && !state.thirdPlace[i]?.startsWith(pool+':')) return;
+
+        const val = `${pool}: ${team}`;
+        const opt = new Option(`${val} (${wins[team]} win${wins[team] === 1 ? '' : 's'})`, val);
+        select.appendChild(opt);
+      });
+    });
+
+    select.value = state.thirdPlace[i] || '';
+
+    select.onchange = () => {
+      state.thirdPlace[i] = select.value;
+      // Third-place changes impact knockout seeding
+      state.R16 = {}; state.QF = {}; state.SF = {}; state.Final = {}; state.Bronze = {};
+      renderAll();
+    };
+
+    thirdEl.appendChild(select);
+  }
+}
+
+// ---------------- KNOCKOUTS ----------------
+const r16El = document.getElementById('round16');
+const qfEl = document.getElementById('quarters');
+const sfEl = document.getElementById('semis');
+const finalsEl = document.getElementById('finals');
+const medalsEl = document.getElementById('medals');
+
+function thirdTeamFromPool(poolLetter) {
+  if (!poolLetter) return 'TBD';
+  const entry = state.thirdPlace.find(t => t?.startsWith(poolLetter + ':'));
+  return entry ? entry.split(': ')[1] : 'TBD';
+}
+
+function renderR16() {
+  r16El.innerHTML = '<h3>Round of 16</h3>';
+  const thirdMap = mapThirdPlaceAssignments();
+
+  const matches = [
+    ['PO1', poolTop('A',1), thirdTeamFromPool(thirdMap.A)],
+    ['PO2', poolTop('B',1), thirdTeamFromPool(thirdMap.B)],
+    ['PO3', poolTop('C',2), poolTop('F',2)],
+    ['PO4', poolTop('E',1), poolTop('D',2)],
+    ['PO5', poolTop('A',2), poolTop('E',2)],
+    ['PO6', poolTop('F',1), poolTop('B',2)],
+    ['PO7', poolTop('C',1), thirdTeamFromPool(thirdMap.C)],
+    ['PO8', poolTop('D',1), thirdTeamFromPool(thirdMap.D)]
+  ];
+
+  matches.forEach(([id, t1, t2]) => {
+    renderMatchButtons(r16El, id, t1, t2, state.R16, (winner) => {
+      state.R16[id] = winner;
+      clearDownstream('R16');
+      renderAll();
+    });
+  });
+}
+
+function renderQF() {
+  qfEl.innerHTML = '<h3>Quarterfinals</h3>';
+  renderMatchButtons(qfEl, 'QF1', state.R16.PO1, state.R16.PO2, state.QF, (w) => {
+    state.QF.QF1 = w; clearDownstream('QF'); renderAll();
+  });
+  renderMatchButtons(qfEl, 'QF2', state.R16.PO3, state.R16.PO4, state.QF, (w) => {
+    state.QF.QF2 = w; clearDownstream('QF'); renderAll();
+  });
+  renderMatchButtons(qfEl, 'QF3', state.R16.PO5, state.R16.PO6, state.QF, (w) => {
+    state.QF.QF3 = w; clearDownstream('QF'); renderAll();
+  });
+  renderMatchButtons(qfEl, 'QF4', state.R16.PO7, state.R16.PO8, state.QF, (w) => {
+    state.QF.QF4 = w; clearDownstream('QF'); renderAll();
+  });
+}
+
+function renderSF() {
+  sfEl.innerHTML = '<h3>Semifinals</h3>';
+  renderMatchButtons(sfEl, 'SF1', state.QF.QF1, state.QF.QF2, state.SF, (w) => {
+    state.SF.SF1 = w; clearDownstream('SF'); renderAll();
+  });
+  renderMatchButtons(sfEl, 'SF2', state.QF.QF3, state.QF.QF4, state.SF, (w) => {
+    state.SF.SF2 = w; clearDownstream('SF'); renderAll();
+  });
+}
+
+function loserOf(winner, a, b) {
+  if (!winner) return '';
+  if (winner === a) return b;
+  if (winner === b) return a;
+  return '';
+}
+
+function renderFinalsAndBronze() {
+  finalsEl.innerHTML = '<h3>Final</h3>';
+  medalsEl.innerHTML = '<h3>Bronze</h3>';
+
+  renderMatchButtons(finalsEl, 'Final', state.SF.SF1, state.SF.SF2, state.Final, (w) => {
+    state.Final.Final = w;
+    clearDownstream('Final');
+    renderAll();
+  });
+
+  // Final score predictions (tiebreaker)
+  const fs = document.createElement('div');
+  fs.className = 'final-scores';
+  fs.innerHTML = '<div class="center"><strong>Final score prediction (tiebreaker)</strong></div>';
+
+  const teamA = state.SF.SF1 || 'TBD';
+  const teamB = state.SF.SF2 || 'TBD';
+
+  const rowA = document.createElement('div');
+  rowA.className = 'row';
+  rowA.innerHTML = `<div class="team">${teamA}</div>`;
+  const inpA = document.createElement('input');
+  inpA.type = 'number';
+  inpA.min = '0';
+  inpA.placeholder = 'Pts';
+  inpA.disabled = (teamA === 'TBD');
+  inpA.value = state.FinalScores.team1;
+  inpA.oninput = () => { state.FinalScores.team1 = inpA.value; };
+  rowA.appendChild(inpA);
+
+  const rowB = document.createElement('div');
+  rowB.className = 'row';
+  rowB.innerHTML = `<div class="team">${teamB}</div>`;
+  const inpB = document.createElement('input');
+  inpB.type = 'number';
+  inpB.min = '0';
+  inpB.placeholder = 'Pts';
+  inpB.disabled = (teamB === 'TBD');
+  inpB.value = state.FinalScores.team2;
+  inpB.oninput = () => { state.FinalScores.team2 = inpB.value; };
+  rowB.appendChild(inpB);
+
+  fs.appendChild(rowA);
+  fs.appendChild(rowB);
+  finalsEl.appendChild(fs);
+
+  // Bronze match: losers of SF1 and SF2
+  const sf1Loser = loserOf(state.SF.SF1, state.QF.QF1, state.QF.QF2) || 'TBD';
+  const sf2Loser = loserOf(state.SF.SF2, state.QF.QF3, state.QF.QF4) || 'TBD';
+
+  renderMatchButtons(medalsEl, 'Bronze', sf1Loser, sf2Loser, state.Bronze, (w) => {
+    state.Bronze.Bronze = w;
+    renderAll();
+  });
+}
+
+function renderAll() {
+  renderPools();
+  renderThirdPlaceSelectors();
+  renderR16();
+  renderQF();
+  renderSF();
+  renderFinalsAndBronze();
+}
+
+// ---------------- ACTIONS ----------------
+function resetAll() {
+  if (!confirm('This will clear all selections and start over. Continue?')) return;
+  state.poolResults = {};
+  state.thirdPlace = [];
+  state.R16 = {}; state.QF = {}; state.SF = {}; state.Final = {}; state.Bronze = {};
+  state.FinalScores = { team1: '', team2: '' };
+  renderAll();
+}
+
+function validateBracketComplete() {
+  const issues = [];
+
+  const name = document.getElementById('userName').value.trim();
+  const email = document.getElementById('userEmail').value.trim();
+  if (!name) issues.push('Enter your name.');
+  if (!email) issues.push('Enter your email.');
+
+  // Pool matches: all winners selected
+  const requiredPoolMatchIds = [];
+  Object.entries(pools).forEach(([pool, teams]) => {
+    const n = generateMatches(teams).length;
+    for (let i = 0; i < n; i++) requiredPoolMatchIds.push(`${pool}-${i}`);
+  });
+  const missingPool = requiredPoolMatchIds.filter(id => !state.poolResults[id]);
+  if (missingPool.length) issues.push(`Select winners for all pool matches (${missingPool.length} remaining).`);
+
+  // Third-place: exactly 4 selected
+  const thirdSelected = state.thirdPlace.filter(Boolean);
+  if (thirdSelected.length !== 4) issues.push('Select 4 best 3rd place teams.');
+
+  // Knockout picks
+  const needKeys = (obj, keys, label) => {
+    const missing = keys.filter(k => !obj[k]);
+    if (missing.length) issues.push(`Select winners for all ${label} matches (${missing.length} remaining).`);
+  };
+
+  needKeys(state.R16, ['PO1','PO2','PO3','PO4','PO5','PO6','PO7','PO8'], 'Round of 16');
+  needKeys(state.QF,  ['QF1','QF2','QF3','QF4'], 'Quarterfinal');
+  needKeys(state.SF,  ['SF1','SF2'], 'Semifinal');
+  needKeys(state.Final, ['Final'], 'Final');
+  needKeys(state.Bronze, ['Bronze'], 'Bronze');
+
+  // Final score prediction: require both scores once final teams are known
+  const finalTeamA = state.SF.SF1;
+  const finalTeamB = state.SF.SF2;
+  if (finalTeamA && finalTeamB) {
+    const a = state.FinalScores.team1;
+    const b = state.FinalScores.team2;
+    const validNum = v => v !== '' && v !== null && !Number.isNaN(Number(v)) && Number(v) >= 0;
+    if (!validNum(a) || !validNum(b)) issues.push('Enter predicted points for both teams in the Final (tiebreaker).');
+  }
+
+  return { ok: issues.length === 0, issues };
+}
+
+function downloadBracket() {
+  const check = validateBracketComplete();
+  if (!check.ok) {
+    alert('Bracket is not complete:\n\n' + check.issues.map(x => '• ' + x).join('\n'));
+    return;
+  }
+
+  const name = document.getElementById('userName').value.trim();
+
+  html2canvas(document.getElementById('bracketRoot')).then(canvas => {
+    const link = document.createElement('a');
+    link.download = `rwc-2027-bracket-${name.replace(/\s+/g,'-').toLowerCase()}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  });
+}
+
+// INIT
+renderAll();
+</script>
+</body>
+</html>
